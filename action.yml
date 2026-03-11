@@ -58,6 +58,10 @@ runs:
           exit 1
         fi
 
+        # Get full commit messages (subject + body) between base and HEAD
+        COMMITS=$(git log --format="### %s%n%n%b" "$BASE"..HEAD 2>/dev/null || \
+                  git log --format="### %s%n%n%b" -1 HEAD)
+
         # Generate a clean diff
         DIFF=$(git diff --unified=3 --no-prefix --no-color "$BASE" \
           | grep -v "^index " \
@@ -71,13 +75,40 @@ runs:
 
         echo "empty=false" >> "$GITHUB_OUTPUT"
 
-        # Write diff to a temp file to avoid argument length limits
-        DIFF_FILE=$(mktemp)
-        echo "$DIFF" > "$DIFF_FILE"
-        echo "diff_file=$DIFF_FILE" >> "$GITHUB_OUTPUT"
+        # Build formatted content
+        CONTENT_FILE=$(mktemp)
+        {
+          echo "# Changes"
+          echo ""
+          # Include PR title and body if this is a pull request
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            PR_TITLE="${{ github.event.pull_request.title }}"
+            if [ -n "$PR_TITLE" ]; then
+              echo "## $PR_TITLE"
+              echo ""
+            fi
+            PR_BODY=$(cat <<'PREOF'
+        ${{ github.event.pull_request.body }}
+        PREOF
+            )
+            if [ -n "$PR_BODY" ]; then
+              echo "$PR_BODY"
+              echo ""
+            fi
+          fi
+          echo "## Commits"
+          echo ""
+          echo "$COMMITS"
+          echo ""
+          echo "## Diff"
+          echo ""
+          echo "$DIFF"
+        } > "$CONTENT_FILE"
 
-        LINES=$(wc -l < "$DIFF_FILE" | tr -d ' ')
-        echo "Diff generated: $LINES lines"
+        echo "diff_file=$CONTENT_FILE" >> "$GITHUB_OUTPUT"
+
+        LINES=$(wc -l < "$CONTENT_FILE" | tr -d ' ')
+        echo "Content generated: $LINES lines"
 
     - name: Submit suggestions
       id: suggest

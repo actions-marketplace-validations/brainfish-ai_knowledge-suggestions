@@ -14,9 +14,6 @@ inputs:
   api_key:
     description: "The Brainfish public API key for authentication"
     required: true
-  agent_key:
-    description: "The Brainfish agent key for authentication"
-    required: true
   api_url:
     description: "The Brainfish API base URL"
     required: false
@@ -112,7 +109,6 @@ runs:
           -X POST "${API_URL}/v1/documents/suggestion" \
           -H "Content-Type: application/json" \
           -H "Authorization: Bearer ${{ inputs.api_key }}" \
-          -H "agent-key: ${{ inputs.agent_key }}" \
           -d "$PAYLOAD")
 
         HTTP_BODY=$(echo "$HTTP_RESPONSE" | sed '$d')

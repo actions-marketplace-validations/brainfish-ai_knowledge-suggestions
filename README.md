@@ -8,7 +8,7 @@ A GitHub Action that generates AI-powered article suggestions from git diffs usi
 - uses: brainfish-ai/create-suggestions@v1
   with:
     api_key: ${{ secrets.BRAINFISH_API_KEY }}
-    agent_key: ${{ secrets.BRAINFISH_AGENT_KEY }}
+
 ```
 
 ### On pull requests
@@ -30,7 +30,7 @@ jobs:
       - uses: brainfish-ai/create-suggestions@v1
         with:
           api_key: ${{ secrets.BRAINFISH_API_KEY }}
-          agent_key: ${{ secrets.BRAINFISH_AGENT_KEY }}
+      
           collection_id: "your-collection-uuid" # optional
 ```
 
@@ -53,7 +53,7 @@ jobs:
       - uses: brainfish-ai/create-suggestions@v1
         with:
           api_key: ${{ secrets.BRAINFISH_API_KEY }}
-          agent_key: ${{ secrets.BRAINFISH_AGENT_KEY }}
+      
 ```
 
 ### With explicit base commit
@@ -62,7 +62,7 @@ jobs:
 - uses: brainfish-ai/create-suggestions@v1
   with:
     api_key: ${{ secrets.BRAINFISH_API_KEY }}
-    agent_key: ${{ secrets.BRAINFISH_AGENT_KEY }}
+
     base: "abc123"
 ```
 
@@ -71,7 +71,6 @@ jobs:
 | Input           | Required | Description                                      |
 | --------------- | -------- | ------------------------------------------------ |
 | `api_key`       | Yes      | Brainfish public API key for authentication      |
-| `agent_key`     | Yes      | Brainfish agent key for authentication           |
 | `collection_id` | No       | Collection ID to target for suggestions          |
 | `base`          | No       | Base commit SHA to generate the diff from        |
 | `api_url`       | No       | API base URL (default: `https://api.brainfi.sh`) |

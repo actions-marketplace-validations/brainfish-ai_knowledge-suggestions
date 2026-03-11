@@ -1,0 +1,138 @@
+name: "Brainfish Create Suggestions"
+description: "Generate AI-powered article suggestions from git diffs using the Brainfish API"
+branding:
+  icon: "file-plus"
+  color: "blue"
+
+inputs:
+  collection_id:
+    description: "The collection ID to target for suggestions"
+    required: false
+  base:
+    description: "The base commit SHA to generate the diff from"
+    required: false
+  api_key:
+    description: "The Brainfish public API key for authentication"
+    required: true
+  agent_key:
+    description: "The Brainfish agent key for authentication"
+    required: true
+  api_url:
+    description: "The Brainfish API base URL"
+    required: false
+    default: "https://api.brainfi.sh"
+
+outputs:
+  task_id:
+    description: "The task ID for the triggered suggestion pipeline"
+    value: ${{ steps.suggest.outputs.task_id }}
+  status:
+    description: "The status of the suggestion request"
+    value: ${{ steps.suggest.outputs.status }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Generate diff
+      id: diff
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        BASE="${{ inputs.base }}"
+
+        # Resolve the base commit
+        if [ -n "$BASE" ]; then
+          echo "Using provided base: $BASE"
+        elif [ "${{ github.event_name }}" = "pull_request" ]; then
+          BASE="${{ github.event.pull_request.base.sha }}"
+          echo "Using pull request base: $BASE"
+        elif [ "${{ github.event_name }}" = "push" ]; then
+          BASE="${{ github.event.before }}"
+          echo "Using push before SHA: $BASE"
+        else
+          BASE="HEAD~1"
+          echo "Falling back to previous commit: $BASE"
+        fi
+
+        # Validate base is a valid ref
+        if ! git cat-file -e "$BASE" 2>/dev/null; then
+          echo "::error::Base ref '$BASE' does not exist. Ensure the repository is fetched with sufficient depth."
+          exit 1
+        fi
+
+        # Generate a clean diff
+        DIFF=$(git diff --unified=3 --no-prefix --no-color "$BASE" \
+          | grep -v "^index " \
+          | grep -v "^diff --git" || true)
+
+        if [ -z "$DIFF" ]; then
+          echo "::warning::No diff detected between $BASE and HEAD. Skipping suggestion."
+          echo "empty=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "empty=false" >> "$GITHUB_OUTPUT"
+
+        # Write diff to a temp file to avoid argument length limits
+        DIFF_FILE=$(mktemp)
+        echo "$DIFF" > "$DIFF_FILE"
+        echo "diff_file=$DIFF_FILE" >> "$GITHUB_OUTPUT"
+
+        LINES=$(wc -l < "$DIFF_FILE" | tr -d ' ')
+        echo "Diff generated: $LINES lines"
+
+    - name: Submit suggestions
+      id: suggest
+      if: steps.diff.outputs.empty != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        DIFF_FILE="${{ steps.diff.outputs.diff_file }}"
+        API_URL="${{ inputs.api_url }}"
+        COLLECTION_ID="${{ inputs.collection_id }}"
+
+        # Build the JSON payload
+        CONTENT=$(jq -Rs '.' < "$DIFF_FILE")
+
+        if [ -n "$COLLECTION_ID" ]; then
+          PAYLOAD=$(jq -n \
+            --argjson content "$CONTENT" \
+            --arg collection_id "$COLLECTION_ID" \
+            '{ content: $content, collection_id: $collection_id }')
+        else
+          PAYLOAD=$(jq -n \
+            --argjson content "$CONTENT" \
+            '{ content: $content }')
+        fi
+
+        # Call the Brainfish API
+        HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" \
+          -X POST "${API_URL}/v1/documents/suggestion" \
+          -H "Content-Type: application/json" \
+          -H "Authorization: Bearer ${{ inputs.api_key }}" \
+          -H "agent-key: ${{ inputs.agent_key }}" \
+          -d "$PAYLOAD")
+
+        HTTP_BODY=$(echo "$HTTP_RESPONSE" | sed '$d')
+        HTTP_STATUS=$(echo "$HTTP_RESPONSE" | tail -n 1)
+
+        # Clean up temp file
+        rm -f "$DIFF_FILE"
+
+        echo "API response status: $HTTP_STATUS"
+
+        if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
+          TASK_ID=$(echo "$HTTP_BODY" | jq -r '.data.task_id // empty')
+          STATUS=$(echo "$HTTP_BODY" | jq -r '.data.status // empty')
+          MESSAGE=$(echo "$HTTP_BODY" | jq -r '.message // empty')
+
+          echo "task_id=$TASK_ID" >> "$GITHUB_OUTPUT"
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          echo "Suggestion pipeline triggered successfully: $MESSAGE"
+        else
+          ERROR=$(echo "$HTTP_BODY" | jq -r '.message // .error // "Unknown error"' 2>/dev/null || echo "$HTTP_BODY")
+          echo "::error::API request failed ($HTTP_STATUS): $ERROR"
+          exit 1
+        fi

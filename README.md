@@ -114,7 +114,7 @@ jobs:
 
 To read a PR from another repository, also set `repository` (`owner/name`) and a `github_token` that can read it.
 
-> **Note:** GitHub's API does not return diffs larger than 300 files / 20,000 lines. For PRs that large, use a full checkout with `base` instead.
+> **Note:** Large diffs are summarized before sending (see [What gets sent](#what-gets-sent)), but GitHub's API itself does not return diffs larger than 300 files / 20,000 lines. For PRs that large, use a full checkout with `base` instead.
 
 ## Inputs
 
@@ -126,6 +126,7 @@ To read a PR from another repository, also set `repository` (`owner/name`) and a
 | `pr_number`     | No       | Pull request number to generate suggestions from (fetched via the GitHub API, no checkout needed) |
 | `repository`    | No       | Repository (`owner/name`) containing the PR. Only used with `pr_number` (default: current repo) |
 | `github_token`  | No       | Token used to read the PR. Only used with `pr_number` (default: `github.token`) |
+| `max_diff_lines` | No      | Diffs up to this many lines are sent in full; larger diffs are replaced by a summary (default: `1000`) |
 | `api_url`       | No       | API base URL (default: `https://api.brainfi.sh`) |
 
 ## Outputs
@@ -144,6 +145,33 @@ To read a PR from another repository, also set `repository` (`owner/name`) and a
 4. Otherwise, falls back to `HEAD~1`
 
 > **Note:** Always use `actions/checkout` with `fetch-depth: 0` to ensure the full git history is available for diff generation.
+
+## What gets sent
+
+The content sent to Brainfish always includes the PR title, description and labels (when available) and the commit messages. The diff is handled as follows:
+
+1. **Noise files are dropped.** These files are never sent:
+   - Lock files: `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `go.sum`, and any `*.lock` / `*.lockb` file (`yarn.lock`, `Cargo.lock`, `poetry.lock`, `uv.lock`, `Gemfile.lock`, `composer.lock`, `Podfile.lock`, ...)
+   - Generated or minified files: `*.min.js`, `*.min.css`, `*.map`, `*.snap`
+   - Anything under `dist/`, `build/`, `node_modules/` or `vendor/`
+   - Binary files
+
+   Dropped files are listed by name so Brainfish knows they changed.
+2. **Small diffs are sent in full.** If the remaining diff is at most `max_diff_lines` lines (default 1000), it is sent as is. Lock files don't count toward the limit.
+3. **Large diffs are summarized.** Otherwise the raw diff is replaced by a deterministic summary (no LLM involved):
+   - Total files changed and lines added/removed
+   - A table of every changed file with its status (added, modified, deleted, renamed) and `+N / -M`, ordered by size of change (up to 300 files)
+   - The functions, classes or sections touched in each file, taken from git's hunk headers (up to 10 per file)
+
+If nothing is left after dropping noise files (for example a PR that only updates a lock file), no request is sent.
+
+## Development
+
+Run the tests for the diff filtering and summary logic:
+
+```bash
+bash tests/test-prepare-content.sh
+```
 
 ## License
 

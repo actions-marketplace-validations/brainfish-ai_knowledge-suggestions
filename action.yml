@@ -22,6 +22,10 @@ inputs:
     description: "GitHub token used to read the pull request. Only used with pr_number. Needs pull-requests: read."
     required: false
     default: ${{ github.token }}
+  max_diff_lines:
+    description: "Diffs up to this many lines (after excluding lock, generated and binary files) are sent in full. Larger diffs are replaced by a summary of changed files, line counts and touched functions."
+    required: false
+    default: "1000"
   api_key:
     description: "The Brainfish public API key for authentication"
     required: true
@@ -54,11 +58,18 @@ runs:
         EVENT_PUSH_BEFORE_SHA: ${{ github.event.before }}
         EVENT_PR_TITLE: ${{ github.event.pull_request.title }}
         EVENT_PR_BODY: ${{ github.event.pull_request.body }}
+        MAX_DIFF_LINES: ${{ inputs.max_diff_lines }}
+        ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
 
-        # Pull request mode: fetch everything from the GitHub API
+        CONTEXT_FILE=$(mktemp)
+        RAW_DIFF=$(mktemp)
+        DIFF_SECTION=$(mktemp)
+        trap 'rm -f "$CONTEXT_FILE" "$RAW_DIFF" "$DIFF_SECTION"' EXIT
+
         if [ -n "$INPUT_PR_NUMBER" ]; then
+          # Pull request mode: fetch everything from the GitHub API
           if ! [[ "$INPUT_PR_NUMBER" =~ ^[0-9]+$ ]]; then
             echo "::error::pr_number must be a number, got '$INPUT_PR_NUMBER'."
             exit 1
@@ -73,25 +84,12 @@ runs:
           PR_JSON=$(gh pr view "$INPUT_PR_NUMBER" --repo "$INPUT_REPOSITORY" \
             --json number,title,body,url,labels,commits)
 
-          if ! DIFF=$(gh pr diff "$INPUT_PR_NUMBER" --repo "$INPUT_REPOSITORY" --color never); then
+          if ! gh pr diff "$INPUT_PR_NUMBER" --repo "$INPUT_REPOSITORY" --color never > "$RAW_DIFF"; then
             echo "::error::Failed to fetch the diff for PR #$INPUT_PR_NUMBER. GitHub's API refuses diffs over 300 files / 20,000 lines; use a checkout with 'base' instead."
             exit 1
           fi
-          DIFF=$(printf '%s\n' "$DIFF" \
-            | grep -v "^index " \
-            | grep -v "^diff --git" || true)
 
-          if [ -z "$DIFF" ]; then
-            echo "::warning::PR #$INPUT_PR_NUMBER has no diff. Skipping suggestion."
-            echo "empty=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "empty=false" >> "$GITHUB_OUTPUT"
-
-          CONTENT_FILE=$(mktemp)
           {
-            echo "# Changes"
-            echo ""
             echo "## $(echo "$PR_JSON" | jq -r '.title')"
             echo ""
             echo "$PR_JSON" | jq -r '"Pull request: \(.url)"'
@@ -108,85 +106,82 @@ runs:
             echo "## Commits"
             echo ""
             echo "$PR_JSON" | jq -r '.commits[] | "### \(.messageHeadline)\n\n\(.messageBody)\n"'
-            echo "## Diff"
-            echo ""
-            echo "$DIFF"
-          } > "$CONTENT_FILE"
+          } > "$CONTEXT_FILE"
 
-          echo "diff_file=$CONTENT_FILE" >> "$GITHUB_OUTPUT"
-          LINES=$(wc -l < "$CONTENT_FILE" | tr -d ' ')
-          echo "Content generated from PR #$INPUT_PR_NUMBER: $LINES lines"
-          exit 0
-        fi
-
-        BASE="$INPUT_BASE"
-
-        # Resolve the base commit
-        if [ -n "$BASE" ]; then
-          echo "Using provided base: $BASE"
-        elif [ "$EVENT_NAME" = "pull_request" ]; then
-          BASE="$EVENT_PR_BASE_SHA"
-          echo "Using pull request base: $BASE"
-        elif [ "$EVENT_NAME" = "push" ]; then
-          BASE="$EVENT_PUSH_BEFORE_SHA"
-          echo "Using push before SHA: $BASE"
+          SOURCE="PR #$INPUT_PR_NUMBER"
         else
-          BASE="HEAD~1"
-          echo "Falling back to previous commit: $BASE"
+          BASE="$INPUT_BASE"
+
+          # Resolve the base commit
+          if [ -n "$BASE" ]; then
+            echo "Using provided base: $BASE"
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            BASE="$EVENT_PR_BASE_SHA"
+            echo "Using pull request base: $BASE"
+          elif [ "$EVENT_NAME" = "push" ]; then
+            BASE="$EVENT_PUSH_BEFORE_SHA"
+            echo "Using push before SHA: $BASE"
+          else
+            BASE="HEAD~1"
+            echo "Falling back to previous commit: $BASE"
+          fi
+
+          # Validate base is a valid ref
+          if ! git cat-file -e "$BASE" 2>/dev/null; then
+            echo "::error::Base ref '$BASE' does not exist. Ensure the repository is fetched with sufficient depth."
+            exit 1
+          fi
+
+          # Get full commit messages (subject + body) between base and HEAD
+          COMMITS=$(git log --format="### %s%n%n%b" "$BASE"..HEAD 2>/dev/null || \
+                    git log --format="### %s%n%n%b" -1 HEAD)
+
+          git diff --unified=3 --no-color --no-ext-diff \
+            --src-prefix=a/ --dst-prefix=b/ "$BASE" > "$RAW_DIFF"
+
+          {
+            # Include PR title and body if this is a pull request
+            if [ "$EVENT_NAME" = "pull_request" ]; then
+              if [ -n "$EVENT_PR_TITLE" ]; then
+                echo "## $EVENT_PR_TITLE"
+                echo ""
+              fi
+              if [ -n "$EVENT_PR_BODY" ]; then
+                echo "$EVENT_PR_BODY"
+                echo ""
+              fi
+            fi
+            echo "## Commits"
+            echo ""
+            echo "$COMMITS"
+            echo ""
+          } > "$CONTEXT_FILE"
+
+          SOURCE="$BASE..HEAD"
         fi
 
-        # Validate base is a valid ref
-        if ! git cat-file -e "$BASE" 2>/dev/null; then
-          echo "::error::Base ref '$BASE' does not exist. Ensure the repository is fetched with sufficient depth."
-          exit 1
-        fi
+        # Drop lock/generated/binary files; send the full diff or a summary
+        bash "$ACTION_PATH/scripts/prepare-content.sh" < "$RAW_DIFF" > "$DIFF_SECTION"
 
-        # Get full commit messages (subject + body) between base and HEAD
-        COMMITS=$(git log --format="### %s%n%n%b" "$BASE"..HEAD 2>/dev/null || \
-                  git log --format="### %s%n%n%b" -1 HEAD)
-
-        # Generate a clean diff
-        DIFF=$(git diff --unified=3 --no-prefix --no-color "$BASE" \
-          | grep -v "^index " \
-          | grep -v "^diff --git" || true)
-
-        if [ -z "$DIFF" ]; then
-          echo "::warning::No diff detected between $BASE and HEAD. Skipping suggestion."
+        if [ ! -s "$DIFF_SECTION" ]; then
+          echo "::warning::No relevant changes in $SOURCE after excluding lock, generated and binary files. Skipping suggestion."
           echo "empty=true" >> "$GITHUB_OUTPUT"
           exit 0
         fi
-
         echo "empty=false" >> "$GITHUB_OUTPUT"
 
-        # Build formatted content
         CONTENT_FILE=$(mktemp)
         {
           echo "# Changes"
           echo ""
-          # Include PR title and body if this is a pull request
-          if [ "$EVENT_NAME" = "pull_request" ]; then
-            if [ -n "$EVENT_PR_TITLE" ]; then
-              echo "## $EVENT_PR_TITLE"
-              echo ""
-            fi
-            if [ -n "$EVENT_PR_BODY" ]; then
-              echo "$EVENT_PR_BODY"
-              echo ""
-            fi
-          fi
-          echo "## Commits"
-          echo ""
-          echo "$COMMITS"
-          echo ""
-          echo "## Diff"
-          echo ""
-          echo "$DIFF"
+          cat "$CONTEXT_FILE"
+          cat "$DIFF_SECTION"
         } > "$CONTENT_FILE"
 
         echo "diff_file=$CONTENT_FILE" >> "$GITHUB_OUTPUT"
 
         LINES=$(wc -l < "$CONTENT_FILE" | tr -d ' ')
-        echo "Content generated: $LINES lines"
+        echo "Content generated from $SOURCE: $LINES lines"
 
     - name: Submit suggestions
       id: suggest

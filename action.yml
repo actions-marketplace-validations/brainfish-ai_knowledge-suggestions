@@ -27,7 +27,7 @@ inputs:
     required: false
     default: "1000"
   api_key:
-    description: "The Brainfish public API key for authentication"
+    description: "The Brainfish API token (bf_api_...) for authentication"
     required: true
   api_url:
     description: "The Brainfish API base URL"

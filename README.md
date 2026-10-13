@@ -2,13 +2,22 @@
 
 A GitHub Action that generates AI-powered article suggestions from git diffs using the Brainfish API.
 
+Full setup guide: [Generate knowledge suggestions from GitHub pull requests](https://help.brainfi.sh/articles/generate-knowledge-suggestions-from-github-pull-requests-fqZjjnDVOl)
+
+## Getting started
+
+1. **Create a Brainfish API token.** In the [Brainfish Dashboard](https://app.brainfi.sh), go to **Settings → API Tokens** and click **Create token**. The token starts with `bf_api_`.
+2. **Store it as a GitHub secret.** In your repository, go to **Settings → Secrets and variables → Actions → New repository secret**, name it `BRAINFISH_API_KEY`, and paste the token.
+3. **Add a workflow** using one of the examples below.
+
+Suggestions go to a review queue in Brainfish, so nothing changes in your knowledge base until you approve it.
+
 ## Usage
 
 ```yaml
 - uses: brainfish-ai/knowledge-suggestions@v1
   with:
     api_key: ${{ secrets.BRAINFISH_API_KEY }}
-
 ```
 
 ### On pull requests
@@ -30,7 +39,6 @@ jobs:
       - uses: brainfish-ai/knowledge-suggestions@v1
         with:
           api_key: ${{ secrets.BRAINFISH_API_KEY }}
-      
           collection_id: "your-collection-uuid" # optional
 ```
 
@@ -53,7 +61,6 @@ jobs:
       - uses: brainfish-ai/knowledge-suggestions@v1
         with:
           api_key: ${{ secrets.BRAINFISH_API_KEY }}
-      
 ```
 
 ### With explicit base commit
@@ -62,7 +69,6 @@ jobs:
 - uses: brainfish-ai/knowledge-suggestions@v1
   with:
     api_key: ${{ secrets.BRAINFISH_API_KEY }}
-
     base: "abc123"
 ```
 
@@ -120,7 +126,7 @@ To read a PR from another repository, also set `repository` (`owner/name`) and a
 
 | Input           | Required | Description                                      |
 | --------------- | -------- | ------------------------------------------------ |
-| `api_key`       | Yes      | Brainfish public API key for authentication      |
+| `api_key`       | Yes      | Brainfish API token (`bf_api_...`) for authentication |
 | `collection_id` | No       | Collection ID to target for suggestions          |
 | `base`          | No       | Base commit SHA to generate the diff from        |
 | `pr_number`     | No       | Pull request number to generate suggestions from (fetched via the GitHub API, no checkout needed) |
@@ -144,7 +150,7 @@ To read a PR from another repository, also set `repository` (`owner/name`) and a
 3. If triggered by a **push**, uses the `before` SHA from the push event
 4. Otherwise, falls back to `HEAD~1`
 
-> **Note:** Always use `actions/checkout` with `fetch-depth: 0` to ensure the full git history is available for diff generation.
+> **Note:** Unless you use `pr_number`, run `actions/checkout` with `fetch-depth: 0` first so the full git history is available for diff generation.
 
 ## What gets sent
 
@@ -165,6 +171,15 @@ The content sent to Brainfish always includes the PR title, description and labe
 
 If nothing is left after dropping noise files (for example a PR that only updates a lock file), no request is sent.
 
+## Versions
+
+| Reference | What you get |
+| --------- | ------------ |
+| `@v1`     | The latest `v1.x` release, including fixes and new features, with no breaking changes (recommended) |
+| `@v1.0.0` | Exactly that release; nothing changes until you update the reference |
+
+See the [releases page](https://github.com/brainfish-ai/knowledge-suggestions/releases) for release notes.
+
 ## Development
 
 Run the tests for the diff filtering and summary logic:
@@ -172,6 +187,23 @@ Run the tests for the diff filtering and summary logic:
 ```bash
 bash tests/test-prepare-content.sh
 ```
+
+### Releasing
+
+1. Merge changes to `main` and confirm the tests pass.
+2. Create a release with a new semver tag, for example `v1.1.0`:
+
+   ```bash
+   gh release create v1.1.0 --target main --generate-notes
+   ```
+
+3. Move the major tag so users on `@v1` get the release. Skip this for a breaking change; release it as `v2.0.0` and create a new `v2` tag instead.
+
+   ```bash
+   git fetch --tags
+   git tag -f v1 v1.1.0
+   git push -f origin v1
+   ```
 
 ## License
 

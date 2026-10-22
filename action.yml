@@ -9,7 +9,10 @@ inputs:
     description: "The collection ID to target for suggestions"
     required: false
   base:
-    description: "The base commit SHA to generate the diff from"
+    description: "The base commit SHA (or tag) to generate the diff from. With release_tag or a release event, this replaces the previous release tag as the starting point."
+    required: false
+  release_tag:
+    description: "A release tag to generate suggestions from, e.g. v1.2.0. Compares it with the previous tag and includes the release notes. Set automatically on release events. Needs actions/checkout with fetch-depth: 0 so tags are available. Use base to override the starting point."
     required: false
   pr_number:
     description: "A pull request number to generate suggestions from. When set, the PR title, description, labels, commits and diff are fetched from the GitHub API, so no checkout is required and the action can run on any event (e.g. workflow_dispatch, merged PRs)."
@@ -51,6 +54,8 @@ runs:
       env:
         INPUT_BASE: ${{ inputs.base }}
         INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+        INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+        EVENT_RELEASE_TAG: ${{ github.event.release.tag_name }}
         INPUT_REPOSITORY: ${{ inputs.repository }}
         GH_TOKEN: ${{ inputs.github_token }}
         EVENT_NAME: ${{ github.event_name }}
@@ -67,6 +72,12 @@ runs:
         RAW_DIFF=$(mktemp)
         DIFF_SECTION=$(mktemp)
         trap 'rm -f "$CONTEXT_FILE" "$RAW_DIFF" "$DIFF_SECTION"' EXIT
+
+        # A release event, or an explicit release_tag, selects release mode
+        RELEASE_TAG="$INPUT_RELEASE_TAG"
+        if [ -z "$RELEASE_TAG" ] && [ "$EVENT_NAME" = "release" ]; then
+          RELEASE_TAG="$EVENT_RELEASE_TAG"
+        fi
 
         if [ -n "$INPUT_PR_NUMBER" ]; then
           # Pull request mode: fetch everything from the GitHub API
@@ -109,6 +120,78 @@ runs:
           } > "$CONTEXT_FILE"
 
           SOURCE="PR #$INPUT_PR_NUMBER"
+        elif [ -n "$RELEASE_TAG" ]; then
+          # Release mode: everything between the previous tag and this tag
+          if ! HEAD_SHA=$(git rev-parse --verify --quiet "refs/tags/$RELEASE_TAG^{commit}"); then
+            echo "::error::Tag '$RELEASE_TAG' was not found. Use actions/checkout with fetch-depth: 0 so tags are fetched."
+            exit 1
+          fi
+
+          if [ -n "$INPUT_BASE" ]; then
+            if ! BASE_SHA=$(git rev-parse --verify --quiet "$INPUT_BASE^{commit}"); then
+              echo "::error::Base ref '$INPUT_BASE' does not exist. Ensure the repository is fetched with sufficient depth."
+              exit 1
+            fi
+            PREV_LABEL="$INPUT_BASE"
+          elif PREV_TAG=$(git describe --tags --abbrev=0 "$HEAD_SHA^" 2>/dev/null); then
+            BASE_SHA=$(git rev-parse "refs/tags/$PREV_TAG^{commit}")
+            PREV_LABEL="$PREV_TAG"
+          else
+            # First release: compare against an empty tree
+            BASE_SHA=""
+            PREV_LABEL="the beginning of the repository"
+          fi
+          echo "Release $RELEASE_TAG: comparing with $PREV_LABEL"
+
+          if [ -n "$BASE_SHA" ]; then
+            RANGE="$BASE_SHA..$HEAD_SHA"
+            DIFF_BASE="$BASE_SHA"
+          else
+            RANGE="$HEAD_SHA"
+            DIFF_BASE=$(git hash-object -t tree /dev/null)
+          fi
+
+          git diff --unified=3 --no-color --no-ext-diff \
+            --src-prefix=a/ --dst-prefix=b/ "$DIFF_BASE" "$HEAD_SHA" > "$RAW_DIFF"
+
+          COMMIT_TOTAL=$(git rev-list --count "$RANGE")
+          COMMITS=$(git log --format="### %s%n%n%b" -n 200 "$RANGE")
+
+          # Release title and notes, when this tag has a GitHub release
+          RELEASE_JSON=""
+          if command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then
+            RELEASE_JSON=$(gh release view "$RELEASE_TAG" --repo "$INPUT_REPOSITORY" \
+              --json name,body,url 2>/dev/null || true)
+          fi
+
+          {
+            RELEASE_NAME=""
+            if [ -n "$RELEASE_JSON" ]; then
+              RELEASE_NAME=$(echo "$RELEASE_JSON" | jq -r '.name // ""')
+            fi
+            echo "## Release ${RELEASE_NAME:-$RELEASE_TAG}"
+            echo ""
+            echo "Tag: $RELEASE_TAG (changes since $PREV_LABEL)"
+            if [ -n "$RELEASE_JSON" ]; then
+              echo "$RELEASE_JSON" | jq -r '"Release: \(.url)"'
+              echo ""
+              RELEASE_BODY=$(echo "$RELEASE_JSON" | jq -r '.body // ""')
+              if [ -n "$RELEASE_BODY" ]; then
+                echo "$RELEASE_BODY"
+              fi
+            fi
+            echo ""
+            echo "## Commits"
+            echo ""
+            if [ "$COMMIT_TOTAL" -gt 200 ]; then
+              echo "Showing the most recent 200 of $COMMIT_TOTAL commits."
+              echo ""
+            fi
+            echo "$COMMITS"
+            echo ""
+          } > "$CONTEXT_FILE"
+
+          SOURCE="release $RELEASE_TAG"
         else
           BASE="$INPUT_BASE"
 

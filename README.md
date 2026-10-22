@@ -42,6 +42,34 @@ jobs:
           collection_id: "your-collection-uuid" # optional
 ```
 
+### On releases
+
+Run the action when you publish a release. It compares the release tag with the **previous tag** and sends the release title and notes, every commit in between (the latest 200), and the diff. This suits teams that ship in batches and want one set of suggestions per release.
+
+```yaml
+name: Suggest articles from release
+on:
+  release:
+    types: [published]
+
+jobs:
+  suggest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # needed so tags are available
+
+      - uses: brainfish-ai/knowledge-suggestions@v1
+        with:
+          api_key: ${{ secrets.BRAINFISH_API_KEY }}
+```
+
+- The previous tag is the nearest earlier tag in the release's history. For the first release, everything up to the tag is used.
+- Set `base` to compare against a different tag or commit instead.
+- To run it for any tag, for example from `workflow_dispatch`, set `release_tag: v1.2.0`.
+- Release notes are read with the workflow's `github.token`. If they can't be read, the action still runs without them.
+
 ### On push to main
 
 ```yaml
@@ -128,7 +156,8 @@ To read a PR from another repository, also set `repository` (`owner/name`) and a
 | --------------- | -------- | ------------------------------------------------ |
 | `api_key`       | Yes      | Brainfish API token (`bf_api_...`) for authentication |
 | `collection_id` | No       | Collection ID to target for suggestions          |
-| `base`          | No       | Base commit SHA to generate the diff from        |
+| `base`          | No       | Base commit SHA (or tag) to generate the diff from. With a release, replaces the previous tag as the starting point |
+| `release_tag`   | No       | Release tag to generate suggestions from, such as `v1.2.0`. Set automatically on `release` events. Needs a checkout with `fetch-depth: 0` |
 | `pr_number`     | No       | Pull request number to generate suggestions from (fetched via the GitHub API, no checkout needed) |
 | `repository`    | No       | Repository (`owner/name`) containing the PR. Only used with `pr_number` (default: current repo) |
 | `github_token`  | No       | Token used to read the PR. Only used with `pr_number` (default: `github.token`) |
@@ -144,17 +173,18 @@ To read a PR from another repository, also set `repository` (`owner/name`) and a
 
 ## How the diff is resolved
 
-0. If `pr_number` is provided, the PR's content and diff are fetched from the GitHub API (steps below are skipped)
-1. If `base` is provided, uses the diff between `base` and `HEAD`
-2. If triggered by a **pull request**, uses the PR base branch SHA
-3. If triggered by a **push**, uses the `before` SHA from the push event
-4. Otherwise, falls back to `HEAD~1`
+1. If `pr_number` is provided, the PR's content and diff are fetched from the GitHub API (steps below are skipped)
+2. Otherwise, if `release_tag` is provided or the workflow runs on a **release**, uses the diff between the previous tag (or `base`, if set) and the release tag, and includes the release notes
+3. If `base` is provided, uses the diff between `base` and `HEAD`
+4. If triggered by a **pull request**, uses the PR base branch SHA
+5. If triggered by a **push**, uses the `before` SHA from the push event
+6. Otherwise, falls back to `HEAD~1`
 
 > **Note:** Unless you use `pr_number`, run `actions/checkout` with `fetch-depth: 0` first so the full git history is available for diff generation.
 
 ## What gets sent
 
-The content sent to Brainfish always includes the PR title, description and labels (when available) and the commit messages. The diff is handled as follows:
+The content sent to Brainfish always includes the PR title, description and labels (or the release title and notes, for releases) and the commit messages. The diff is handled as follows:
 
 1. **Noise files are dropped.** These files are never sent:
    - Lock files: `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `go.sum`, and any `*.lock` / `*.lockb` file (`yarn.lock`, `Cargo.lock`, `poetry.lock`, `uv.lock`, `Gemfile.lock`, `composer.lock`, `Podfile.lock`, ...)
@@ -186,6 +216,12 @@ Run the tests for the diff filtering and summary logic:
 
 ```bash
 bash tests/test-prepare-content.sh
+```
+
+The release mode tests build throwaway git repos with real tags and run the step from `action.yml` (they need `python3` with PyYAML):
+
+```bash
+bash tests/test-release-mode.sh
 ```
 
 ### Releasing
